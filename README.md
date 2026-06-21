@@ -87,6 +87,16 @@ when the hardware pipeline was working correctly:
    want to retune this, change `sensitivity` in Settings (or `AppConfig.default`
    for new installs) and re-test both "does a normal tap register" and "does
    typing for 30s produce zero false fires" before keeping a change.
+3. **Hard-slap ringdown could spuriously fire a second, phantom slap.** A hard
+   enough hit saturates the sensor's single sensed axis and rings down for up
+   to ~2s afterward; that ringing tail could itself pass the 5-vote check and
+   register as an unintended extra slap right after a real one. Fixed in
+   `SlapDetector.ingest`/`finalizeSlapSequence`: once a sequence that included
+   a clipping hit finalizes, a settle gate blocks new detections until the
+   signal actually returns near its own pre-impact baseline (captured live
+   from the buffer, not a fixed g value, so it isn't broken by orientation
+   changes). Soft/normal-force taps never trip this gate, so legitimate fast
+   double/triple-taps are unaffected.
 
 ## Build & run
 

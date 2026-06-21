@@ -35,6 +35,25 @@ final class SlapDetector: ObservableObject {
 
     private let minInterSlapGap: TimeInterval = 0.15 // refractory period to avoid double counting one impact
 
+    /// A hard physical slap saturates this sensor and rings down for up to ~2s
+    /// afterward (confirmed empirically — see AccelerometerMonitor's doc comment).
+    /// `minInterSlapGap` alone (150ms) can't filter that out without also blocking
+    /// genuine fast multi-taps, so instead: after a confirmed slap, require the
+    /// signal to actually settle back toward its own pre-impact baseline before a
+    /// new vote is allowed to register — this distinguishes "still ringing from the
+    /// last hit" from "a deliberate new tap," and is self-calibrating per machine/
+    /// orientation since the baseline is captured live from the buffer, not a fixed
+    /// absolute g value (which would be wrong the moment lid angle changes gravity's
+    /// projection onto this single sensed axis).
+    private var awaitingSettle = false
+    private var settleBaseline: Double = 1.0
+    /// Set the moment any tap within the *current, still-open* multi-slap sequence
+    /// clips the sensor; only then does finalizing the sequence arm the settle
+    /// gate — a soft/normal-force multi-tap sequence is left completely
+    /// unaffected, so the already-validated fast-double/triple-tap behavior
+    /// can't regress.
+    private var sawClippingThisSequence = false
+
     var onSlot: ((Int) -> Void)?
 
     init(configStore: ConfigStore) {
@@ -89,6 +108,11 @@ final class SlapDetector: ObservableObject {
 
     // MARK: - Sample ingestion
 
+    /// Magnitude at which this sensor's single sensed axis saturates (raw int16
+    /// rail / 16384 LSB-per-g scale) — only hits this hard a clip ring down for
+    /// ~2s afterward, so only these trigger the settle gate below.
+    private let clipMagnitudeG = 1.95
+
     private func ingest(magnitude: Double, timestamp: TimeInterval) {
         liveMagnitudeG = magnitude
         if magnitude > peakMagnitudeG { peakMagnitudeG = magnitude }
@@ -98,6 +122,15 @@ final class SlapDetector: ObservableObject {
             buffer.removeFirst(buffer.count - bufferCapacity)
         }
         guard buffer.count >= 16 else { return }
+
+        if awaitingSettle {
+            if magnitude <= settleBaseline * 1.3 + 0.1 {
+                awaitingSettle = false
+            } else {
+                return // still ringing down from a hard slap; don't let the tail re-trigger
+            }
+        }
+
         guard timestamp - lastSlapAt > minInterSlapGap else { return }
 
         let sensitivity = configStore.config.sensitivity // 0 (least) ... 1 (most)
@@ -105,6 +138,14 @@ final class SlapDetector: ObservableObject {
 
         // Require a majority of the five algorithms to agree (>= 3 of 5).
         if votes.votesInFavor >= 3 {
+            if magnitude >= clipMagnitudeG && !sawClippingThisSequence {
+                sawClippingThisSequence = true
+                let preImpact = buffer.dropLast(8)
+                if !preImpact.isEmpty {
+                    let window = preImpact.suffix(30)
+                    settleBaseline = window.reduce(0, +) / Double(window.count)
+                }
+            }
             lastSlapAt = timestamp
             registerSlap(at: timestamp)
         }
@@ -140,6 +181,10 @@ final class SlapDetector: ObservableObject {
     private func finalizeSlapSequence() {
         let count = pendingSlapCount
         pendingSlapCount = 0
+        if sawClippingThisSequence {
+            awaitingSettle = true
+            sawClippingThisSequence = false
+        }
         guard count > 0 else { return }
         if ProcessInfo.processInfo.environment["SLAPSHIFT_DEBUG_SEQ"] == "1" {
             FileHandle.standardError.write("finalizeSlapSequence count=\(count) at \(CFAbsoluteTimeGetCurrent())\n".data(using: .utf8)!)
