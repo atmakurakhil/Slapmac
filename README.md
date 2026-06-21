@@ -1,4 +1,4 @@
-# SlapShift (clone of an existing app)
+# SlapShift (clone of an existing app) only for macbooks*
 
 A menu-bar macOS app that triggers app/URL/Focus-mode actions when you physically
 slap your MacBook — inspired by [slapshift.app](https://slapshift.app/). This is
